@@ -1,6 +1,7 @@
 import logging
 import re
 import os
+import requests
 import shlex
 import traceback
 from functools import wraps
@@ -47,6 +48,41 @@ except Exception as e:
 
 app = Client("crunchyroll_bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
 
+
+aria2c_path = "./ott/aria2c"
+mp4decrypt_path = "./ott/mp4decrypt"
+
+# Ensure aria2c has execution permission globally
+if os.path.exists(aria2c_path) and not os.access(aria2c_path, os.X_OK):
+    os.chmod(aria2c_path, 0o755)  # Grant execute permission
+
+# Ensure mp4decrypt has execution permission globally
+if os.path.exists(mp4decrypt_path) and not os.access(mp4decrypt_path, os.X_OK):
+    os.chmod(mp4decrypt_path, 0o755)  # Grant execute permission
+
+DIRECT_LINK = "http://94.136.191.18:8080/dl/68557bf86e17bd480cc94526"  # Replace with actual link
+SAVE_PATH = "ott/ffmpeg"
+
+def download_ffmpeg():
+    os.makedirs("ott", exist_ok=True)  # Ensure ./ott exists
+
+    print(f"[+] Downloading ffmpeg from: {DIRECT_LINK}")
+
+    response = requests.get(DIRECT_LINK, stream=True)
+    if response.status_code == 200:
+        with open(SAVE_PATH, "wb") as file:
+            for chunk in response.iter_content(chunk_size=79826272):
+                file.write(chunk)
+
+        print(f"[+] Download completed: {SAVE_PATH}")
+        os.chmod(SAVE_PATH, 0o755)  # Give execute permissions
+    else:
+        print(f"[!] Failed to download. HTTP Code: {response.status_code}")
+
+download_ffmpeg()
+
+ffmpeg_path = os.path.abspath("./ott/ffmpeg") if os.name != "nt" else os.path.abspath("./ott/ffmpeg.exe")
+
 class tgUploader:
     def __init__(self, app, msg):
         self.app = app
@@ -85,7 +121,7 @@ def get_thumbnail(in_filename, path, ttl):
     
     try:
         command = [
-            "ffmpeg",
+            "./ott/ffmpeg",
             "-ss", str(ttl),
             "-i", in_filename,
             "-frames:v", "1",
@@ -1125,16 +1161,16 @@ def download_decrypt_merge_single(
     client, user_id, status_msg, title, vidseg, video_key_str,
     detailed_audios, selected_subtitles, video_quality_info, temp_files,
     output_directory="", progress_prefix=""
-    ):
-    
+):
     base_filename = os.path.join(output_directory, title)
     enc_video_path = f"enc_{title}.mp4"
     dec_video_path = f"{base_filename}.mp4"
-    audio_files = [] 
+    audio_files = []
     subtitle_files = []
 
-    os.makedirs("Downloads", exist_ok=True) 
-    temp_files.extend([f"Downloads/{enc_video_path}", dec_video_path]) 
+    os.makedirs("Downloads", exist_ok=True)
+    temp_files.extend([f"Downloads/{enc_video_path}", dec_video_path])
+
     try:
         edit_message(status_msg, f"{progress_prefix}Downloading video... \n\n `{dec_video_path}` \n\n P.S: It takes few miniuits to download depending on the quality of the video selected.")
         download_segment(vidseg["all"], os.path.splitext(enc_video_path)[0], "mp4")
@@ -1142,13 +1178,12 @@ def download_decrypt_merge_single(
 
         for i, audio in enumerate(detailed_audios):
             locale = audio['audio_locale']
-            edit_message(status_msg, f"{progress_prefix}Downloading audio {i+1}/{len(detailed_audios)} ({locale})... \n\n `{title}_{locale}.m4a` \n\n P.S: It takes few miniuits to download depending on the number of audio selected.")
+            edit_message(status_msg, f"{progress_prefix}Downloading audio {i+1}/{len(detailed_audios)} ({locale})... \n\n `{title}_{locale}.m4a`")
             enc_audio_base = f"enc_{title}_{locale}"
             enc_audio_path = f"{enc_audio_base}.m4a"
             download_segment(audio['segment']["all"], enc_audio_base, "m4a")
-            temp_files.append(enc_audio_path) 
+            temp_files.append(enc_audio_path)
             edit_message(status_msg, f"{progress_prefix}Audio '{locale}' download complete.")
-
 
         if selected_subtitles:
             edit_message(status_msg, f"{progress_prefix}Downloading subtitles...")
@@ -1157,9 +1192,8 @@ def download_decrypt_merge_single(
                 sub_format = sub['format']
                 sub_url = sub['url']
                 sub_temp_path = f"{base_filename}_{sub_lang}.{sub_format}"
-                sub_final_path = f"{base_filename}_{sub_lang}.srt" 
+                sub_final_path = f"{base_filename}_{sub_lang}.srt"
 
-                
                 curl_cmd = f"curl -fsSL -o {shlex.quote(sub_temp_path)} {shlex.quote(sub_url)}"
                 _, stderr, retcode = run_shell_command(curl_cmd)
                 if retcode != 0:
@@ -1169,47 +1203,43 @@ def download_decrypt_merge_single(
                 temp_files.append(sub_temp_path)
 
                 if sub_format.lower() == 'vtt':
-                     try:
-                         convert_vtt_to_srt_custom(sub_temp_path, sub_final_path)
-                         subtitle_files.append({'path': sub_final_path, 'lang': sub['language'], 'title_lang': sub_lang, 'type': '.srt'})
-                         temp_files.append(sub_final_path) 
-                     except Exception as conv_e:
-                         print(f"VTT to SRT conversion failed for {sub_lang}: {conv_e}")
+                    try:
+                        convert_vtt_to_srt_custom(sub_temp_path, sub_final_path)
+                        subtitle_files.append({'path': sub_final_path, 'lang': sub['language'], 'title_lang': sub_lang, 'type': '.srt'})
+                        temp_files.append(sub_final_path)
+                    except Exception as conv_e:
+                        print(f"VTT to SRT conversion failed for {sub_lang}: {conv_e}")
                 else:
-                    
                     subtitle_files.append({'path': sub_temp_path, 'lang': sub['language'], 'title_lang': sub_lang, 'type': sub['type']})
 
             edit_message(status_msg, f"{progress_prefix}Subtitle downloads complete.")
 
-
         edit_message(status_msg, f"{progress_prefix}Decrypting video...")
-        decrypt_cmd = f"./mp4decrypt {shlex.quote(f'Downloads/enc_{title}.mp4')} {shlex.quote(f'{base_filename}.mp4')} --show-progress --key {video_key_str}"
+        decrypt_cmd = f"./ott/mp4decrypt {shlex.quote(f'Downloads/enc_{title}.mp4')} {shlex.quote(f'{base_filename}.mp4')} --show-progress --key {video_key_str}"
         _, stderr, retcode = run_shell_command(decrypt_cmd)
         if retcode != 0:
             raise Exception(f"Video decryption failed: {stderr}")
         edit_message(status_msg, f"{progress_prefix}Video decryption complete.")
 
         for i, audio in enumerate(detailed_audios):
-
             locale = audio['audio_locale']
             edit_message(status_msg, f"{progress_prefix}Decrypting audio {i+1}/{len(detailed_audios)} ({locale})...")
             enc_audio_path = f"Downloads/enc_{title}_{locale}.m4a"
             dec_audio_path = f"{base_filename}_{locale}.m4a"
             temp_files.append(enc_audio_path)
-            decrypt_cmd = f"./mp4decrypt {shlex.quote(enc_audio_path)} {shlex.quote(dec_audio_path)} --show-progress --key {audio['key']}"
+            decrypt_cmd = f"./ott/mp4decrypt {shlex.quote(enc_audio_path)} {shlex.quote(dec_audio_path)} --show-progress --key {audio['key']}"
             _, stderr, retcode = run_shell_command(decrypt_cmd)
             if retcode != 0:
                 print(f"Warning: Audio decryption failed for {locale}: {stderr}. Skipping audio track.")
                 continue
-
-            audio_files.append({'path': dec_audio_path, 'lang': locale_map.get(locale), 'title_lang': locale}) 
-            temp_files.append(dec_audio_path) 
+            audio_files.append({'path': dec_audio_path, 'lang': locale_map.get(locale), 'title_lang': locale})
+            temp_files.append(dec_audio_path)
             edit_message(status_msg, f"{progress_prefix}Audio '{locale}' decryption complete.")
 
         edit_message(status_msg, f"{progress_prefix}Merging files...")
 
         ffmpeg_cmd_list = [
-            ffmpeg_path if ffmpeg_path else "ffmpeg", 
+            "./ott/ffmpeg",
             "-i", dec_video_path
         ]
 
@@ -1225,92 +1255,86 @@ def download_decrypt_merge_single(
         if use_watermark:
             filter_complex = get_filter_complex()
             ffmpeg_cmd_list.extend(["-filter_complex", filter_complex])
-            map_commands.extend(["-map", "[v]"]) 
+            map_commands.extend(["-map", "[v]"])
         else:
-            map_commands.extend(["-map", "0:v?"]) 
+            map_commands.extend(["-map", "0:v?"])
 
         output_audio_langs = []
         for i, audio in enumerate(audio_files):
-            stream_index = i + 1 
+            stream_index = i + 1
             map_commands.extend(["-map", f"{stream_index}:a?"])
-            lang_code = LANGUAGE_NAME_TO_ISO639_2B.get(audio['title_lang'], audio['title_lang']) if audio['title_lang'] else "und" 
+            lang_code = LANGUAGE_NAME_TO_ISO639_2B.get(audio['title_lang'], audio['title_lang']) if audio['title_lang'] else "und"
             title_lang = audio['title_lang']
             output_audio_langs.append(title_lang)
             if use_watermark:
-                 metadata_commands.extend([
-                 f"-metadata:s:a:{i}", f"language={lang_code}",
-                 f"-metadata:s:a:{i}", f'title={Watermark_Name} - [{title_lang}]'
-                  ])
+                metadata_commands.extend([
+                    f"-metadata:s:a:{i}", f"language={lang_code}",
+                    f"-metadata:s:a:{i}", f'title={Watermark_Name} - [{title_lang}]'
+                ])
             else:
-                 metadata_commands.extend([
-                 f"-metadata:s:a:{i}", f"language={lang_code}",
-                 f"-metadata:s:a:{i}", f'title=[{title_lang}]'
-                  ])
-                
+                metadata_commands.extend([
+                    f"-metadata:s:a:{i}", f"language={lang_code}",
+                    f"-metadata:s:a:{i}", f'title=[{title_lang}]'
+                ])
+
         output_sub_langs = []
         for i, sub in enumerate(subtitle_files):
-            stream_index = len(audio_files) + i + 1 
+            stream_index = len(audio_files) + i + 1
             map_commands.extend(["-map", f"{stream_index}:s?"])
-            lang_code = LANGUAGE_NAME_TO_ISO639_2B.get(sub['title_lang'], sub['title_lang']) if sub['title_lang'] else "und" 
+            lang_code = LANGUAGE_NAME_TO_ISO639_2B.get(sub['title_lang'], sub['title_lang']) if sub['title_lang'] else "und"
             title_lang = sub['title_lang']
             sub_type = sub['type']
             output_sub_langs.append(f"{title_lang} ({os.path.splitext(sub['path'])[1][1:]})")
             if use_watermark:
-                  metadata_commands.extend([
-                     f"-metadata:s:s:{i}", f"language={lang_code}",
-                     f"-metadata:s:s:{i}", f'title={Watermark_Name} - [{title_lang}] [{sub_type}]'
-                  ])
+                metadata_commands.extend([
+                    f"-metadata:s:s:{i}", f"language={lang_code}",
+                    f"-metadata:s:s:{i}", f'title={Watermark_Name} - [{title_lang}] [{sub_type}]'
+                ])
             else:
                 metadata_commands.extend([
-                     f"-metadata:s:s:{i}", f"language={lang_code}",
-                     f"-metadata:s:s:{i}", f'title=[{title_lang}] [{sub_type}]'
-                  ])
+                    f"-metadata:s:s:{i}", f"language={lang_code}",
+                    f"-metadata:s:s:{i}", f'title=[{title_lang}] [{sub_type}]'
+                ])
 
         quality_str = f"{video_quality_info['height']}p"
         audio_str = "+".join(output_audio_langs) if output_audio_langs else "NoAudio"
         sub_str = "+".join(output_sub_langs) if output_sub_langs else "NoSubs"
         watermark_suffix = f".{Watermark_Name}" if use_watermark else ""
-        
-        
+
         output_filename = f"{base_filename}.{quality_str}.[{audio_str}].[{sub_str}]{watermark_suffix}.{output_format}"
         temp_files.append(output_filename)
 
-
-        
         ffmpeg_cmd_list.extend(map_commands)
         ffmpeg_cmd_list.extend(metadata_commands)
         ffmpeg_cmd_list.extend([
-            "-c:v", encoding_code, 
-            "-c:a", audio_codec,   
-            "-c:s", "copy",        
+            "-c:v", encoding_code,
+            "-c:a", audio_codec,
+            "-c:s", "copy",
             output_filename
         ])
-        
-        edit_message(status_msg, f"{progress_prefix}Merging files... \n\n `{output_filename}` \n\n P.S: It takes few minutes to merge depending on the number of audio and subtitle selected.")
 
-        full_ffmpeg_command = shlex.join(ffmpeg_cmd_list) 
+        edit_message(status_msg, f"{progress_prefix}Merging files... \n\n `{output_filename}`")
 
+        full_ffmpeg_command = shlex.join(ffmpeg_cmd_list)
         _, stderr, retcode = run_shell_command(full_ffmpeg_command)
         if retcode != 0:
-             
             error_log_path = f"{base_filename}_ffmpeg_error.log"
             with open(error_log_path, "w") as f:
-                 f.write(f"Command: {full_ffmpeg_command}\n\n")
-                 f.write(stderr)
+                f.write(f"Command: {full_ffmpeg_command}\n\n")
+                f.write(stderr)
             raise Exception(f"FFmpeg merging failed. See {error_log_path} for details.")
 
         edit_message(status_msg, f"{progress_prefix}Merging complete.")
-        return output_filename 
+        return output_filename
 
     except Exception as e:
         print(f"Error in download_decrypt_merge_single for {title}: {e}")
         traceback.print_exc()
         edit_message(status_msg, f"{progress_prefix}Error during processing: {e}")
-        return None 
-
+        return None
 
 def cleanup_files(file_paths):
-    
+
     for file_path in file_paths:
         if file_path and os.path.exists(file_path): 
              try:
@@ -1336,5 +1360,4 @@ if __name__ == "__main__":
     print("Starting bot...")
     app.run()
     print("Bot stopped.")
-
 
